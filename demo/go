@@ -1,0 +1,15 @@
+export INO_PORT=/dev/ttyUSB0
+export INO_CPU=uno
+echo $INO_PORT $INO_CPU
+
+DIR=ino-demo
+
+mkdir -p $DIR/src
+for f in demo.ino
+do
+  rsync $f $DIR/src/
+done
+cd $DIR &&
+ino build -m $INO_CPU &&
+ino upload -m $INO_CPU -p $INO_PORT
+# python /usr/share/doc/python-serial/examples/miniterm.py $INO_PORT 1000000
