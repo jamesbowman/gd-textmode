@@ -6,6 +6,6 @@ part = xc3s200a-4vq100
 top_module = top
 flashsize = 2048
 
-vfiles = ../verilog/top.v ../verilog/ck_div.v
+vfiles = ../verilog/top.v
 
 include xilinx.mk

@@ -1,3 +1,5 @@
+`default_nettype none
+
 module top(
   input clka,
   output [2:0] vga_red,
@@ -36,12 +38,38 @@ module top(
      .RST(0)
   );
 
-  textmode tm(.clk(clk), 
+  wire we;
+  wire [7:0] wd;
+  wire textMISO;
+
+  spi _s (.clk(clk),
+          .SCK(SCK),
+          .MOSI(MOSI),
+          .MISO(textMISO),
+          .SSEL(SSEL),
+          .we(we),
+          .byte_recv(wd),
+          .byte_xmit(8'ha0));
+
+  reg[14:0] a;
+  wire wclk = SCK;
+
+  textmode tm(.wclk(wclk), 
+              .write(we),
+              .addr(a),
+              .d(wd),
+              .clk(clk),
               .vga_red(vga_red),
               .vga_green(vga_green),
               .vga_blue(vga_blue),
               .vga_hsync_n(vga_hsync_n),
               .vga_vsync_n(vga_vsync_n));
+
+  always @(posedge SSEL or posedge SCK)
+    if (SSEL == 1)
+      a <= 5;
+    else if (we)
+      a <= a + 1;
 
   assign AUDIOL = 0;
   assign AUDIOR = 0;
@@ -50,15 +78,75 @@ module top(
   assign flashSCK = SCK;
   assign flashSSEL = AUX;
 
-  assign MISO = (SSEL == 0) ? 1'b0 : flashMISO;
+  assign MISO = (SSEL == 0) ? textMISO : flashMISO;
+
+endmodule
+
+module spi(
+  input clk,
+  input SCK, input MOSI, output MISO, input SSEL,
+
+  output we,
+  output [7:0] byte_recv,
+  input [7:0] byte_xmit);
+
+  reg [2:0] bit;
+  reg [7:0] recv;
+  wire [7:0] recvN = {recv[6:0], MOSI};
+
+  always @(posedge SSEL or posedge SCK)
+    if (SSEL == 1)
+      bit <= 7;
+    else begin
+      recv <= recvN;
+      bit <= bit - 1;
+    end
+
+  assign MISO = byte_xmit[bit[2:0]];
+  assign byte_recv = recvN;
+  assign we = !SSEL & (bit == 0);
+endmodule
+
+module ram16k(
+    input           wclk,
+    input           We,
+    input  [13:0]    Waddr,
+    input  [7:0]   Din,
+
+    input           rclk,
+    input  [13:0]    Raddr,
+    output [7:0]   Dout);
+ 
+    //synthesis attribute ram_style of mem is block
+    reg    [7:0]  mem[0:16383]; //pragma attribute mem ram_block TRUE
+    reg    [13:0]  raddr_reg;
+ 
+    initial begin
+        $readmemh("init.hex", mem);
+    end
+
+    always @ (posedge wclk)
+      if (We)
+        mem[Waddr]  <= Din;  
+ 
+    always @ (posedge rclk)
+      raddr_reg  <= Raddr;
+      // Dout  <= mem[raddr_reg];   //registered read
+ 
+    assign Dout = mem[raddr_reg];  //unregistered read            
 
 endmodule
 
 module textmode(
+  input wclk,
+  input write,
+  input [14:0] addr,
+  input [7:0] d,
+
   input clk,
-  output [2:0] vga_red,
-  output [2:0] vga_green,
-  output [2:0] vga_blue,
+  output reg [2:0] vga_red,
+  output reg [2:0] vga_green,
+  output reg [2:0] vga_blue,
   output reg vga_hsync_n,
   output reg vga_vsync_n);
 
@@ -91,32 +179,41 @@ module textmode(
 
   wire visible = (hcounter < 1024) & (vcounter < 768);
 
+  wire [7:0] cc;
+  ram16k r(.wclk(wclk), .rclk(clk), .We(write), .Waddr(addr[13:0]), .Raddr(hcounterN[10:3]), .Din(d), .Dout(cc));
+  // assign cc = hcounterN[10:3] + vcounterN[9:4];
   wire pix;
-  fontrom fr(.ch(hcounterN[10:3] + vcounterN[9:4]), .row(vcounterN[3:0]), .col(hcounterN[2:0]), .pix(pix));
+  fontrom fr(.clk(clk), .ch(cc), .row(vcounterN[3:0]), .col(hcounterN[2:0] - 1), .pix(pix));
 
   always @(posedge clk) begin
     hcounter <= hcounterN;
     vcounter <= vcounterN;
     vga_hsync_n <= !((1048 <= hcounter) & (hcounter < 1184));
     vga_vsync_n <= !((771 <= vcounter) & (vcounter < 777));
+    vga_red <= visible ? {pix, pix, pix} : 3'b000;
+    vga_green <= visible ? {pix, pix, pix} : 3'b000;
+    vga_blue <= visible ? {pix, pix, pix} : 3'b000;
   end
-
-  assign vga_red = visible ? {pix, pix, pix} : 3'b000;
-  assign vga_green = visible ? {pix, pix, pix} : 3'b000;
-  assign vga_blue = visible ? {pix, pix, pix} : 3'b000;
-
 endmodule
 
 module fontrom(
+  input clk,
   input [7:0] ch,
   input [3:0] row,
   input [2:0] col,
   output pix);
 
+  reg [11:0] a;
+  reg [2:0] col_;
+  always @(posedge clk) begin
+    a <= {ch, row};
+    col_ <= col;
+  end
+    
   reg [7:0] pattern;
-  assign pix = pattern[~col];
+  assign pix = pattern[~col_];
   always @*
-  case ({ch, row})
+  case (a)
     { 8'h00, 4'h0 }: pattern = 8'b00000000; 
     { 8'h00, 4'h1 }: pattern = 8'b00000000; 
     { 8'h00, 4'h2 }: pattern = 8'b00000000; 
