@@ -22,19 +22,19 @@ module top(
   output flashSSEL
   );
 
-  wire ck_fb;
-  wire clk;
+  // Convert 25MHz input clock to 65MHz by multiplying by 13/5.
+  wire ck_fb, clk;
   DCM #(
      .CLKFX_MULTIPLY(13),
      .CLKFX_DIVIDE(5),
-     .DFS_FREQUENCY_MODE("LOW"), // HIGH or LOW frequency mode for frequency synthesis
-     .DUTY_CYCLE_CORRECTION("TRUE"), // Duty cycle correction, TRUE or FALSE
-     .STARTUP_WAIT("TRUE")    // Delay configuration DONE until DCM LOCK, TRUE/FALSE
+     .DFS_FREQUENCY_MODE("LOW"),
+     .DUTY_CYCLE_CORRECTION("TRUE"),
+     .STARTUP_WAIT("TRUE")
   ) DCM_inst (
+     .CLKIN(clka),     // Clock input (from IBUFG, BUFG or DCM)
      .CLK0(ck_fb),    
      .CLKFX(clk), 
      .CLKFB(ck_fb),    // DCM clock feedback
-     .CLKIN(clka),     // Clock input (from IBUFG, BUFG or DCM)
      .RST(0)
   );
 
@@ -79,17 +79,15 @@ module top(
       3:  begin a <= a + 1; end
       endcase
 
-  assign AUDIOL = 0;
-  assign AUDIOR = 0;
-
+  assign {AUDIOL, AUDIOR} = 2'b00;
   assign flashMOSI = MOSI;
   assign flashSCK = SCK;
   assign flashSSEL = AUX;
 
   assign MISO = (SSEL == 0) ? textMISO : flashMISO;
-
 endmodule
 
+// SPI controller
 module spi(
   input clk,
   input SCK, input MOSI, output MISO, input SSEL,
@@ -115,81 +113,46 @@ module spi(
   assign we = !SSEL & (bit == 0);
 endmodule
 
+// A 16384x8 RAM with one write port and one read port
 module ram16k(
-    input           wclk,
-    input           We,
-    input  [13:0]    Waddr,
-    input  [7:0]   Din,
+  input         wclk,
+  input         write,
+  input [13:0]  waddr,
+  input [7:0]   din,
 
-    input           rclk,
-    input  [13:0]    Raddr,
-    output [7:0]   Dout);
- 
-    //synthesis attribute ram_style of mem is block
-    reg    [7:0]  mem[0:16383]; //pragma attribute mem ram_block TRUE
-    reg    [13:0]  raddr_reg;
- 
-    initial begin
-        $readmemh("init.hex", mem);
-    end
+  input         rclk,
+  input  [13:0] raddr,
+  output [7:0]  dout);
 
-    always @ (posedge wclk)
-      if (We)
-        mem[Waddr]  <= Din;  
- 
-    always @ (posedge rclk)
-      raddr_reg  <= Raddr;
-      // Dout  <= mem[raddr_reg];   //registered read
- 
-    assign Dout = mem[raddr_reg];  //unregistered read            
+  //synthesis attribute ram_style of mem is block
+  reg    [7:0]  mem[0:16383]; //pragma attribute mem ram_block TRUE
+  reg    [13:0]  raddr_reg;
 
-endmodule
+  always @ (posedge wclk)
+    if (write)
+      mem[waddr]  <= din;  
 
-// The 16 standard VGA colors
-module vga16(input [3:0] i,
-             output [2:0] r,
-             output [2:0] g,
-             output [2:0] b);
+  always @ (posedge rclk)
+    raddr_reg  <= raddr;
 
-  reg [5:0] rgbRGB;
-  always @*
-  case (i)
-    0:    rgbRGB = 6'b000000;
-    1:    rgbRGB = 6'b000001;
-    2:    rgbRGB = 6'b000010;
-    3:    rgbRGB = 6'b000011;
-    4:    rgbRGB = 6'b000100;
-    5:    rgbRGB = 6'b000101;
-    6:    rgbRGB = 6'b010100;
-    7:    rgbRGB = 6'b000111;
-    8:    rgbRGB = 6'b111000;
-    9:    rgbRGB = 6'b111001;
-    10:   rgbRGB = 6'b111010;
-    11:   rgbRGB = 6'b111011;
-    12:   rgbRGB = 6'b111100;
-    13:   rgbRGB = 6'b111101;
-    14:   rgbRGB = 6'b111110;
-    15:   rgbRGB = 6'b111111;
-  endcase
-  assign r = {rgbRGB[2],rgbRGB[5],rgbRGB[2]};
-  assign g = {rgbRGB[1],rgbRGB[4],rgbRGB[1]};
-  assign b = {rgbRGB[0],rgbRGB[3],rgbRGB[0]};
+  assign dout = mem[raddr_reg];
 endmodule
 
 module textmode(
-  input wclk,
-  input write,
-  input [14:0] addr,
-  input [7:0] d,
+  input wclk,                   // write clock
+  input write,                  // write enable
+  input [14:0] addr,            // write address 0-32767
+  input [7:0] d,                // write data
 
-  input clk,
-  input [6:0] scroll,
-  output reg [2:0] vga_red,
+  input clk,                    // pixel clock
+  input [6:0] scroll,           // Y scroll value, 0-127
+  output reg [2:0] vga_red,     // VGA output signals
   output reg [2:0] vga_green,
   output reg [2:0] vga_blue,
   output reg vga_hsync_n,
   output reg vga_vsync_n);
 
+  // These timing values come from
   // http://tinyvga.com/vga-timing/1024x768@60Hz
 
   // hcounter:
@@ -202,7 +165,7 @@ module textmode(
   wire [10:0] hcounterN = (hcounter == 11'd1343) ? 11'd0 : (hcounter + 11'd1);
 
   // vcounter:
-  //  0  -767     visble area
+  //  0  -767     visible area
   //  768-770     front porch
   //  771-776     sync pulse
   //  777-805     back porch
@@ -222,31 +185,51 @@ module textmode(
   wire [7:0] ram_char, ram_attr;
   wire [6:0] row = scroll + vcounterN[9:4];
   wire [13:0] raddr = {row, hcounterN[9:3]};
-  ram16k attr(.wclk(wclk), .rclk(clk), .We(write & (addr[0] == 0)), .Waddr(addr[14:1]), .Raddr(raddr), .Din(d), .Dout(ram_char));
-  ram16k char(.wclk(wclk), .rclk(clk), .We(write & (addr[0] == 1)), .Waddr(addr[14:1]), .Raddr(raddr), .Din(d), .Dout(ram_attr));
+  ram16k attr(.wclk(wclk), .rclk(clk), .write(write & (addr[0] == 0)), .waddr(addr[14:1]), .raddr(raddr), .din(d), .dout(ram_char));
+  ram16k char(.wclk(wclk), .rclk(clk), .write(write & (addr[0] == 1)), .waddr(addr[14:1]), .raddr(raddr), .din(d), .dout(ram_attr));
 
-  // assign cc = hcounterN[10:3] + vcounterN[9:4];
   wire pix;
   fontrom fr(.clk(clk), .ch(ram_char), .row(vcounterN[3:0]), .col(hcounterN[2:0] - 1), .pix(pix));
 
   reg pix_;
   reg [7:0] attr1, attr2;
+  reg [1:0] visible_;
+  reg [1:0] hsync_;
   always @(posedge clk) begin
     pix_ <= pix;
     {attr2, attr1} <= {attr1, ram_attr};
+    visible_ <= {visible_[0], visible};
+    hsync_ <= {hsync_[0], !((1048 <= hcounter) & (hcounter < 1184))};
   end
   wire [3:0] index = pix_ ? attr2[3:0] : attr2[7:4];
-  wire [2:0] r, g, b;
-  vga16 rgb(.i(index), .r(r), .g(g), .b(b));
+  reg [2:0] r, g, b;
+  always @*
+    case (index)
+    0:    {r, g, b} = { 3'b000, 3'b000, 3'b000 };
+    1:    {r, g, b} = { 3'b000, 3'b000, 3'b101 };
+    2:    {r, g, b} = { 3'b000, 3'b101, 3'b000 };
+    3:    {r, g, b} = { 3'b000, 3'b101, 3'b101 };
+    4:    {r, g, b} = { 3'b101, 3'b000, 3'b000 };
+    5:    {r, g, b} = { 3'b101, 3'b000, 3'b101 };
+    6:    {r, g, b} = { 3'b101, 3'b010, 3'b000 };
+    7:    {r, g, b} = { 3'b101, 3'b101, 3'b101 };
+    8:    {r, g, b} = { 3'b010, 3'b010, 3'b010 };
+    9:    {r, g, b} = { 3'b010, 3'b010, 3'b111 };
+    10:   {r, g, b} = { 3'b010, 3'b111, 3'b010 };
+    11:   {r, g, b} = { 3'b010, 3'b111, 3'b111 };
+    12:   {r, g, b} = { 3'b111, 3'b010, 3'b010 };
+    13:   {r, g, b} = { 3'b111, 3'b010, 3'b111 };
+    14:   {r, g, b} = { 3'b111, 3'b111, 3'b010 };
+    15:   {r, g, b} = { 3'b111, 3'b111, 3'b111 };
+    endcase
 
   always @(posedge clk) begin
     hcounter <= hcounterN;
     vcounter <= vcounterN;
-    vga_hsync_n <= !((1048 <= hcounter) & (hcounter < 1184));
+    vga_hsync_n <= hsync_[1];
     vga_vsync_n <= !((771 <= vcounter) & (vcounter < 777));
-    vga_red   <= visible ? r : 3'b000;
-    vga_green <= visible ? g : 3'b000;
-    vga_blue  <= visible ? b : 3'b000;
+    vga_red   <= visible_[1] ? r : 3'b000;
+    vga_green <= visible_[1] ? g : 3'b000;
+    vga_blue  <= visible_[1] ? b : 3'b000;
   end
 endmodule
-
